@@ -53,7 +53,7 @@ class Dataset:
 Dataset(
     name="housing",
     url="https://archive.ics.uci.edu/ml/machine-learning-databases/housing/housing.data",  # noqa: E501
-    load_func=partial(pd.read_csv, header=None, delim_whitespace=True),
+    load_func=partial(pd.read_csv, header=None, sep=r"\s+"),
 )
 
 Dataset(
@@ -72,7 +72,7 @@ Dataset(
     name="naval",
     url="https://archive.ics.uci.edu/ml/machine-learning-databases/00316/UCI%20CBM%20Dataset.zip",  # noqa: E501
     file_to_unpack="data.txt",
-    load_func=partial(pd.read_csv, header=None, delim_whitespace=True),
+    load_func=partial(pd.read_csv, header=None, sep=r"\s+"),
     processing_func=lambda x: x.iloc[:, :-1],
 )
 
@@ -100,7 +100,7 @@ Dataset(
 Dataset(
     name="yacht",
     url="http://archive.ics.uci.edu/ml/machine-learning-databases/00243/yacht_hydrodynamics.data",  # noqa: E501
-    load_func=partial(pd.read_csv, header=None, delim_whitespace=True),
+    load_func=partial(pd.read_csv, header=None, sep=r"\s+"),
 )
 
 Dataset(
@@ -126,7 +126,7 @@ def load_dataset(name, data_dir=DATA_DIR):
     else:
         _logger.info("Dataset not locally cached, downloading from url...")
         download_dataset(dataset, local_path)
-        return load_dataset(name)
+        return load_dataset(name, data_dir=data_dir)
 
 
 def load_local_dataset(dataset, local_path):
@@ -150,11 +150,13 @@ def download_dataset(dataset, local_path):
 
 
 def unpack_file_from_zip(zip_file, to_unpack, path):
-    with zipfile.ZipFile(zip_file, "r") as inzipfile:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            inzipfile.extractall(path=temp_dir)
-            data_file = glob.glob(f"{temp_dir}/**/{to_unpack}", recursive=True)[0]
-            shutil.copyfile(data_file, path)
+    with (
+        zipfile.ZipFile(zip_file, "r") as inzipfile,
+        tempfile.TemporaryDirectory() as temp_dir,
+    ):
+        inzipfile.extractall(path=temp_dir)
+        data_file = glob.glob(f"{temp_dir}/**/{to_unpack}", recursive=True)[0]
+        shutil.copyfile(data_file, path)
 
 
 # -------------------------------------------------------------------------------------
@@ -234,12 +236,16 @@ def ngb_regressor(data):
 
 @evaluate
 def xgb_distribution(data):
-    xgbd = XGBDistribution(max_depth=3, natural_gradient=True, n_estimators=500)
+    xgbd = XGBDistribution(
+        max_depth=3,
+        natural_gradient=True,
+        n_estimators=500,
+        early_stopping_rounds=10,
+    )
     xgbd.fit(
         data.X_train,
         data.y_train,
         eval_set=[(data.X_val, data.y_val)],
-        early_stopping_rounds=10,
         verbose=False,
     )
     return xgbd.predict(data.X_test)
@@ -247,12 +253,11 @@ def xgb_distribution(data):
 
 @evaluate
 def xgb_regressor(data):
-    xgb = XGBRegressor(max_depth=3, n_estimators=500)
+    xgb = XGBRegressor(max_depth=3, n_estimators=500, early_stopping_rounds=10)
     xgb.fit(
         data.X_train,
         data.y_train,
         eval_set=[(data.X_val, data.y_val)],
-        early_stopping_rounds=10,
         verbose=False,
     )
     return xgb.predict(data.X_test)

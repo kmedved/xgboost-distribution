@@ -5,7 +5,6 @@ from collections import namedtuple
 import numpy as np
 from scipy.stats import poisson
 
-from xgboost_distribution.compat import linalg_solve
 from xgboost_distribution.distributions.base import BaseDistribution
 from xgboost_distribution.distributions.utils import (
     check_all_ge_zero,
@@ -13,7 +12,7 @@ from xgboost_distribution.distributions.utils import (
     safe_exp,
 )
 
-Params = namedtuple("Params", ("mu"))
+Params = namedtuple("Params", ["mu"])
 
 
 class Poisson(BaseDistribution):
@@ -53,10 +52,9 @@ class Poisson(BaseDistribution):
         grad[:, 0] = mu - y
 
         if natural_gradient:
-            fisher_matrix = np.zeros(shape=(len(y), 1, 1), dtype="float32")
-            fisher_matrix[:, 0, 0] = mu
-
-            grad = linalg_solve(fisher_matrix, grad)
+            # Reparameterised Fisher = mu (1x1). Cast to float32 before dividing,
+            # matching the legacy `linalg.solve(F, g)` rounding.
+            grad[:, 0] /= np.asarray(mu, dtype="float32")
             hess = np.ones(shape=(len(y), 1), dtype="float32")  # constant hessian
         else:
             hess = mu

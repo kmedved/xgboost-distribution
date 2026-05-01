@@ -118,7 +118,9 @@ The `predict()` method on each distribution applies the inverse transform.
 
 ### Natural gradients
 
-By default, `XGBDistribution` uses **natural gradients** (`natural_gradient=True`). Instead of `g`, it solves `F · g_natural = g`, where `F` is the (reparameterised) Fisher information matrix of the distribution. This was first applied to gradient boosting in [NGBoost](https://github.com/stanfordmlgroup/ngboost) and gives more stable updates when the parameter space is curved (e.g. variance directions for Normal). The matrix solve uses [`numpy.linalg.solve`](https://numpy.org/doc/stable/reference/generated/numpy.linalg.solve.html) (wrapped in [`compat.linalg_solve`](../src/xgboost_distribution/compat.py) for NumPy 2.x compatibility).
+By default, `XGBDistribution` uses **natural gradients** (`natural_gradient=True`). Instead of `g`, it computes `g_natural = F⁻¹ · g`, where `F` is the (reparameterised) Fisher information matrix of the distribution. This was first applied to gradient boosting in [NGBoost](https://github.com/stanfordmlgroup/ngboost) and gives more stable updates when the parameter space is curved (e.g. variance directions for Normal).
+
+For Normal, LogNormal, Laplace, Exponential, and Poisson, `F` is diagonal in its reparameterised form, so `F⁻¹ · g` reduces to element-wise division by the diagonal entries — no matrix solve is needed. NegativeBinomial uses a **diagonal approximation**: the off-diagonal cross term is dropped (see the class docstring in [`negative_binomial.py`](../src/xgboost_distribution/distributions/negative_binomial.py) for caveats). The implementation casts each diagonal entry to `float32` before dividing, so results are bit-identical to the legacy `numpy.linalg.solve` path on a matching `float32` Fisher matrix.
 
 Set `natural_gradient=False` to fall back to vanilla gradients with a diagonal Hessian.
 

@@ -5,7 +5,6 @@ from collections import namedtuple
 import numpy as np
 from scipy.stats import norm
 
-from xgboost_distribution.compat import linalg_solve
 from xgboost_distribution.distributions.base import BaseDistribution
 from xgboost_distribution.distributions.utils import MAX_EXPONENT, MIN_EXPONENT
 
@@ -77,11 +76,10 @@ class Normal(BaseDistribution):
         grad[:, 1] = 1 - ((y - loc) ** 2) / var
 
         if natural_gradient:
-            fisher_matrix = np.zeros(shape=(len(y), 2, 2), dtype="float32")
-            fisher_matrix[:, 0, 0] = 1 / var
-            fisher_matrix[:, 1, 1] = 2
-
-            grad = linalg_solve(fisher_matrix, grad)
+            # Diagonal Fisher: F = diag(1/var, 2). Cast diag entries to float32
+            # before dividing, matching the legacy `linalg.solve(F, g)` rounding.
+            grad[:, 0] /= np.asarray(1 / var, dtype="float32")
+            grad[:, 1] /= np.float32(2.0)
             hess = np.ones(shape=(len(y), 2), dtype="float32")  # constant hessian
         else:
             hess = np.zeros(shape=(len(y), 2), dtype="float32")  # diagonal elems only

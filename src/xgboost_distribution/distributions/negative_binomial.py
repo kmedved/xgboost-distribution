@@ -6,7 +6,6 @@ import numpy as np
 from scipy.special import digamma, expit
 from scipy.stats import nbinom
 
-from xgboost_distribution.compat import linalg_solve
 from xgboost_distribution.distributions.base import BaseDistribution
 from xgboost_distribution.distributions.utils import (
     MAX_EXPONENT,
@@ -43,7 +42,15 @@ class NegativeBinomial(BaseDistribution):
                         = p * (k - e^a e^-b)
                         = p * (k - n e^-b)
 
-    The Fisher Information:
+    The Fisher Information used here is a **diagonal approximation** —
+    the off-diagonal cross-term F_ab is dropped, and the diagonal entries
+    are taken from the literature approximation referenced below. Under the
+    stated pmf, the true reparameterised Fisher is not diagonal; this
+    implementation has been retained for backwards compatibility with the
+    legacy natural-gradient direction. See `tests/distributions/test_negative_binomial.py`
+    for the reference values this code is verified against.
+
+    Approximation:
 
         I(n) ~ p / [ n (p+1) ]
         I(p) = n / [ p (1-p)^2 ]
@@ -63,7 +70,8 @@ class NegativeBinomial(BaseDistribution):
 
         -> I_r(p) = [ p^2 (1-p)^2 n ] / [ p (1-p)^2 ] = np
 
-    Hence the reparameterized Fisher information:
+    Hence the reparameterized Fisher information used in code (off-diagonal
+    cross term ignored as approximation):
 
         [  np / (p+1), 0 ]
         [  0,         np ]
@@ -93,11 +101,13 @@ class NegativeBinomial(BaseDistribution):
         grad[:, 1] = p * (y - n * (1 - p) / p)
 
         if natural_gradient:
-            fisher_matrix = np.zeros(shape=(len(y), 2, 2), dtype="float32")
-            fisher_matrix[:, 0, 0] = (n * p) / (p + 1)
-            fisher_matrix[:, 1, 1] = n * p
-
-            grad = linalg_solve(fisher_matrix, grad)
+            # Diagonal Fisher approximation: F = diag((n*p)/(p+1), n*p) per the
+            # docstring. Cast diag entries to float32 before dividing, matching
+            # the legacy `linalg.solve(F, g)` rounding. (See class docstring for
+            # caveats on the diagonal-only approximation.)
+            np_product = n * p
+            grad[:, 0] /= np.asarray(np_product / (p + 1), dtype="float32")
+            grad[:, 1] /= np.asarray(np_product, dtype="float32")
             hess = np.ones(shape=(len(y), 2), dtype="float32")  # constant hessian
         else:
             raise NotImplementedError(

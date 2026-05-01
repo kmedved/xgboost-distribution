@@ -5,7 +5,6 @@ from collections import namedtuple
 import numpy as np
 from scipy.stats import cauchy, laplace
 
-from xgboost_distribution.compat import linalg_solve
 from xgboost_distribution.distributions.base import BaseDistribution
 from xgboost_distribution.distributions.utils import safe_exp
 
@@ -66,16 +65,16 @@ class Laplace(BaseDistribution):
 
         loc, scale = self.predict(params)
 
+        diff = loc - y
         grad = np.zeros(shape=(len(y), 2), dtype="float32")
-        grad[:, 0] = np.sign(loc - y) / scale
-        grad[:, 1] = 1 - np.abs(loc - y) / scale
+        grad[:, 0] = np.sign(diff) / scale
+        grad[:, 1] = 1 - np.abs(diff) / scale
 
         if natural_gradient:
-            fisher_matrix = np.zeros(shape=(len(y), 2, 2), dtype="float32")
-            fisher_matrix[:, 0, 0] = 1 / scale**2
-            fisher_matrix[:, 1, 1] = 1
-
-            grad = linalg_solve(fisher_matrix, grad)
+            # Diagonal Fisher: F = diag(1/scale**2, 1). Cast diag to float32
+            # before dividing, matching the legacy `linalg.solve(F, g)` rounding.
+            grad[:, 0] /= np.asarray(1 / scale**2, dtype="float32")
+            # grad[:, 1] unchanged (diag entry == 1)
             hess = np.ones(shape=(len(y), 2), dtype="float32")  # constant hessian
         else:
             hess = np.zeros(shape=(len(y), 2), dtype="float32")

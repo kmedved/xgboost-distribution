@@ -254,4 +254,4 @@ class XGBDistribution(XGBRegressor):
         return feval
 
     def _get_base_margin(self, n_samples: int) -> np.ndarray:
-        return np.ones(shape=(n_samples, 1)) * np.array(self._starting_params)
+        return np.tile(np.array(self._starting_params), (n_samples, 1))

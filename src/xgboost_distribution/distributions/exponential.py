@@ -5,11 +5,10 @@ from collections import namedtuple
 import numpy as np
 from scipy.stats import expon
 
-from xgboost_distribution.compat import linalg_solve
 from xgboost_distribution.distributions.base import BaseDistribution
 from xgboost_distribution.distributions.utils import check_all_ge_zero, safe_exp
 
-Params = namedtuple("Params", ("scale"))
+Params = namedtuple("Params", ["scale"])
 
 
 class Exponential(BaseDistribution):
@@ -49,9 +48,7 @@ class Exponential(BaseDistribution):
         grad[:, 0] = 1 - y / scale
 
         if natural_gradient:
-            fisher_matrix = np.ones(shape=(len(y), 1, 1), dtype="float32")
-
-            grad = linalg_solve(fisher_matrix, grad)
+            # Reparameterised Fisher = 1, so natural gradient equals raw gradient.
             hess = np.ones(shape=(len(y), 1), dtype="float32")  # constant hessian
         else:
             hess = -(grad - 1)

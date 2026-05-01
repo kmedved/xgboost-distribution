@@ -9,7 +9,6 @@ src/xgboost_distribution/
 ├── __init__.py              # exports XGBDistribution
 ├── model.py                 # XGBDistribution(XGBRegressor) — sklearn-compatible model
 ├── metrics.py               # log-likelihood scorers for sklearn (e.g. GridSearchCV)
-├── compat.py                # numpy/xgboost compatibility shims
 ├── utils.py                 # JSON serialisation helpers
 └── distributions/
     ├── base.py              # BaseDistribution (abstract)
@@ -120,7 +119,11 @@ The `predict()` method on each distribution applies the inverse transform.
 
 By default, `XGBDistribution` uses **natural gradients** (`natural_gradient=True`). Instead of `g`, it computes `g_natural = F⁻¹ · g`, where `F` is the (reparameterised) Fisher information matrix of the distribution. This was first applied to gradient boosting in [NGBoost](https://github.com/stanfordmlgroup/ngboost) and gives more stable updates when the parameter space is curved (e.g. variance directions for Normal).
 
-For Normal, LogNormal, Laplace, Exponential, and Poisson, `F` is diagonal in its reparameterised form, so `F⁻¹ · g` reduces to element-wise division by the diagonal entries — no matrix solve is needed. NegativeBinomial uses a **diagonal approximation**: the off-diagonal cross term is dropped (see the class docstring in [`negative_binomial.py`](../src/xgboost_distribution/distributions/negative_binomial.py) for caveats). The implementation casts each diagonal entry to `float32` before dividing, so results are bit-identical to the legacy `numpy.linalg.solve` path on a matching `float32` Fisher matrix.
+For Normal, LogNormal, Exponential, and Poisson, `F` is diagonal in its reparameterised form, so `F⁻¹ · g` reduces to element-wise division by the diagonal entries — no matrix solve is needed. The implementation casts each diagonal entry to `float32` before dividing, matching the legacy `numpy.linalg.solve` path bit-for-bit on a `float32` Fisher matrix.
+
+**Laplace** uses the algebraically simplified `sign(loc - y) * scale` form for the location column directly. This is mathematically equivalent to dividing by the diagonal `1/scale²` but avoids the `scale²` intermediate, which overflows float32 when `safe_exp` is near its upper clip. The simplification is *not* bit-identical to the legacy solve at the ulp level, only mathematically equivalent.
+
+**NegativeBinomial** uses a **diagonal approximation**: the off-diagonal cross term `F_ab = -n(1-p)` is dropped, and each diagonal entry is floored at `DIAG_FLOOR` (≈ 1e-30) before division to prevent float32 underflow at the parameter clipping boundaries. The raw gradient is also computed in float64 (and column 1 uses the algebraic form `p*y - n*(1-p)` rather than `p*(y - n*(1-p)/p)`) so the intermediates don't overflow float32 at the upper-clip boundary. As a result NegativeBinomial is **not bit-identical** to the legacy `linalg.solve` path — it matches within a few float32 ulps on non-extreme inputs and stays finite at the clipping boundaries. See the class docstring in [`negative_binomial.py`](../src/xgboost_distribution/distributions/negative_binomial.py) for the derivation and caveats.
 
 Set `natural_gradient=False` to fall back to vanilla gradients with a diagonal Hessian.
 

@@ -67,16 +67,18 @@ class Laplace(BaseDistribution):
 
         diff = loc - y
         grad = np.zeros(shape=(len(y), 2), dtype="float32")
-        grad[:, 0] = np.sign(diff) / scale
         grad[:, 1] = 1 - np.abs(diff) / scale
 
         if natural_gradient:
-            # Diagonal Fisher: F = diag(1/scale**2, 1). Cast diag to float32
-            # before dividing, matching the legacy `linalg.solve(F, g)` rounding.
-            grad[:, 0] /= np.asarray(1 / scale**2, dtype="float32")
-            # grad[:, 1] unchanged (diag entry == 1)
+            # Diagonal Fisher: F = diag(1/scale**2, 1). The natural-gradient
+            # column 0 reduces algebraically to sign(diff) * scale; computing
+            # it directly avoids the scale**2 intermediate, which overflows
+            # float32 at large scales (safe_exp clips up to ~e^87, so scale**2
+            # can hit inf).
+            grad[:, 0] = np.sign(diff) * scale
             hess = np.ones(shape=(len(y), 2), dtype="float32")  # constant hessian
         else:
+            grad[:, 0] = np.sign(diff) / scale
             hess = np.zeros(shape=(len(y), 2), dtype="float32")
             # Note: Delta functions won't work well, hence we approximate with cauchy
             hess[:, 0] = 2 * cauchy.pdf(y, loc, scale) / scale

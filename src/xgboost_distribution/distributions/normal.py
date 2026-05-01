@@ -32,9 +32,9 @@ class Normal(BaseDistribution):
     (Note: reparameterizing to log(std) ensures that std >= 0, regardless of
     what the xgboost booster internally outputs, as std = e^b > 0.)
 
-    The gradients are:
+    The gradients of the negative log-likelihood are:
 
-        d/da -log[f(x)] = e^(-2b) * (x-a) = (x-a) / var
+        d/da -log[f(x)] = e^(-2b) * (a-x) = (a-x) / var
         d/db -log[f(x)] = 1 - e^(-2b) * (x-a)^2 = 1 - (x-a)^2 / var
 
     as var = std^2 = e^(2b)

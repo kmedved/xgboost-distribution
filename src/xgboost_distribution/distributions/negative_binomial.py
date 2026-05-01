@@ -17,6 +17,16 @@ from xgboost_distribution.distributions.utils import (
 
 Params = namedtuple("Params", ("n", "p"))
 
+# Floor for the Fisher diagonal entries. Both `n*p/(p+1)` and `n*(1-p)` can
+# round to zero in float32 at the parameter clipping boundaries — `expit`
+# saturates to exactly 1.0 at MAX_EXPONENT (so `1-p == 0`), and `n*p` can
+# underflow when both `log_n` and `logit_p` hit their MIN_EXPONENT clips.
+# Flooring at 1e-30 keeps the natural gradient finite for ordinary finite
+# targets at the clipping boundaries. It is intended to engage only near
+# degenerate parameter regions where the diagonal approximation is
+# numerically singular or near-singular.
+DIAG_FLOOR = np.float32(1e-30)
+
 
 class NegativeBinomial(BaseDistribution):
     """Negative binomial distribution with log score
@@ -42,39 +52,55 @@ class NegativeBinomial(BaseDistribution):
                         = p * (k - e^a e^-b)
                         = p * (k - n e^-b)
 
-    The Fisher Information used here is a **diagonal approximation** —
-    the off-diagonal cross-term F_ab is dropped, and the diagonal entries
-    are taken from the literature approximation referenced below. Under the
-    stated pmf, the true reparameterised Fisher is not diagonal; this
-    implementation has been retained for backwards compatibility with the
-    legacy natural-gradient direction. See `tests/distributions/test_negative_binomial.py`
-    for the reference values this code is verified against.
+    Under the stated pmf, the true reparameterised Fisher information has a
+    nonzero off-diagonal term `F_ab = -n(1-p)`. We use a **diagonal
+    approximation** — the cross term is dropped — to keep the natural-gradient
+    update cheap (no per-sample matrix solve). The two diagonal entries are
+    derived independently below.
 
-    Approximation:
+    F_bb (b = logit(p) parameter):
 
-        I(n) ~ p / [ n (p+1) ]
-        I(p) = n / [ p (1-p)^2 ]
+        d/db -log[f(k)] = p*k - n*(1-p)
+        d²/db² -log[f(k)] = p*(1-p)*(k + n)
+        F_bb = E[ d²/db² -log[f(k)] ] = p*(1-p) * (E[K] + n)
+             = p*(1-p) * (n*(1-p)/p + n)              [E[K] = n(1-p)/p]
+             = n*(1-p)
 
-    where we used an approximation for I(n) presented here:
-        http://erepository.uonbi.ac.ke:8080/xmlui/handle/123456789/33803
+    F_aa (a = log(n) parameter):
 
-    In reparameterized form, we find I_r(n) and I_r(p):
+        d/da -log[f(k)] = -n*[ψ(k+n) - ψ(n) + log(p)]
+        F_aa involves E[trigamma(K+n)]; we use the literature approximation
 
-        p / [ n (p+1) ] = I_r(n) [ d/dn log(n) ]^2
-                        = I_r(n) ( 1/n )^2
+            I(n) ~ p / [ n*(p+1) ]   ->   F_aa = I_r(n) = n*p / (p+1)
 
-        -> I_r(n) = np / (p+1)
+        from http://erepository.uonbi.ac.ke:8080/xmlui/handle/123456789/33803
 
-        n / [ p (1-p)^2 ] = I_r(p) [ d/dp log(p/(1-p)) ]^2
-                          = I_r(p) ( 1/ [ p (1-p) ] )^2
+    Hence the diagonal Fisher approximation used in code:
 
-        -> I_r(p) = [ p^2 (1-p)^2 n ] / [ p (1-p)^2 ] = np
+        [ n*p / (p+1), 0       ]
+        [ 0,           n*(1-p) ]
 
-    Hence the reparameterized Fisher information used in code (off-diagonal
-    cross term ignored as approximation):
+    Each diagonal entry is also floored at `DIAG_FLOOR` (≈ 1e-30, defined at
+    module level) before division. This is a numerical safeguard — at the
+    parameter clipping boundaries (e.g. `expit(MAX_EXPONENT)` saturates to
+    exactly 1.0 in float32, making `1-p == 0`), the diagonals would otherwise
+    round to zero and produce inf/nan natural gradients. The floor is
+    intended to engage only near degenerate parameter regions where the
+    diagonal approximation is numerically singular or near-singular.
 
-        [  np / (p+1), 0 ]
-        [  0,         np ]
+    The raw gradient is computed in float64 (and the column-1 form is
+    rewritten as `p*y - n*(1-p)` rather than `p*(y - n*(1-p)/p)`) to keep
+    the intermediates from overflowing float32 at the upper-clip boundary
+    (`log_n = MAX_EXPONENT`, `logit_p = MIN_EXPONENT`). The final
+    natural gradient still casts back into the float32 destination. As a
+    result, NegativeBinomial is **no longer bit-identical** to the legacy
+    `numpy.linalg.solve` path; it matches within a few float32 ulps on
+    non-extreme inputs and stays finite at the clipping boundaries.
+
+    Note: the legacy code (xgboost-distribution <= 0.4.0) used `F_bb = n*p`,
+    which is incorrect under the stated pmf; this was corrected in commit
+    history. The off-diagonal cross term is still dropped as an
+    approximation.
 
     Ref:
 
@@ -94,20 +120,41 @@ class NegativeBinomial(BaseDistribution):
         """Gradient and diagonal hessian"""
 
         n, p = self.predict(params)
-
         grad = np.zeros(shape=(len(y), 2), dtype="float32")
 
-        grad[:, 0] = -n * (digamma(y + n) - digamma(n) + np.log(p))
-        grad[:, 1] = p * (y - n * (1 - p) / p)
-
         if natural_gradient:
-            # Diagonal Fisher approximation: F = diag((n*p)/(p+1), n*p) per the
-            # docstring. Cast diag entries to float32 before dividing, matching
-            # the legacy `linalg.solve(F, g)` rounding. (See class docstring for
-            # caveats on the diagonal-only approximation.)
-            np_product = n * p
-            grad[:, 0] /= np.asarray(np_product / (p + 1), dtype="float32")
-            grad[:, 1] /= np.asarray(np_product, dtype="float32")
+            # Diagonal Fisher approximation: F = diag(n*p/(p+1), n*(1-p)).
+            # See class docstring for the derivation and a note on why the
+            # cross term is dropped.
+            #
+            # Two numerical safeguards:
+            #   1. Compute the raw gradient in float64. At the upper-clip
+            #      boundary `log_n = MAX_EXPONENT, logit_p = MIN_EXPONENT`,
+            #      `n ≈ 1.25e38` and `log(p) ≈ -73`, so `-n * log(p)`
+            #      overflows float32 even though the natural gradient
+            #      (after dividing by F_aa) is well within float32 range.
+            #   2. Use the algebraic rewrite `p*y - n*(1-p)` for column 1
+            #      instead of `p*(y - n*(1-p)/p)`. The latter has an
+            #      `n*(1-p)/p` intermediate that overflows when `p → 0`.
+            # Diagonal entries are cast to float32 and floored at
+            # DIAG_FLOOR to avoid float32 underflow when `expit` saturates
+            # to 1.0 or `n*p` underflows.
+            n64 = np.asarray(n, dtype="float64")
+            p64 = np.asarray(p, dtype="float64")
+            y64 = np.asarray(y, dtype="float64")
+
+            raw0 = -n64 * (digamma(y64 + n64) - digamma(n64) + np.log(p64))
+            raw1 = p64 * y64 - n64 * (1 - p64)
+
+            diag0 = np.maximum(
+                np.asarray((n64 * p64) / (p64 + 1), dtype="float32"), DIAG_FLOOR
+            ).astype("float64")
+            diag1 = np.maximum(
+                np.asarray(n64 * (1 - p64), dtype="float32"), DIAG_FLOOR
+            ).astype("float64")
+
+            grad[:, 0] = raw0 / diag0
+            grad[:, 1] = raw1 / diag1
             hess = np.ones(shape=(len(y), 2), dtype="float32")  # constant hessian
         else:
             raise NotImplementedError(

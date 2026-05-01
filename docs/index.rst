@@ -12,6 +12,11 @@ Contents
    :maxdepth: 2
 
    Overview <readme>
+   Architecture <architecture>
+   Distributions <distributions>
+   Examples <examples>
+   Development <development>
+   Troubleshooting <troubleshooting>
    Experiments <experiments>
    Module Reference <api>
    License <license>

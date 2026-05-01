@@ -78,7 +78,10 @@ extensions = [
     "sphinx.ext.ifconfig",
     "sphinx.ext.mathjax",
     "sphinx.ext.napoleon",
+    "myst_parser",
 ]
+
+myst_enable_extensions = ["colon_fence", "deflist"]
 
 
 autodoc_default_flags = ["members"]
@@ -94,7 +97,10 @@ autosummary_generate = ["api.rst"]
 templates_path = ["_templates"]
 
 # The suffix of source filenames.
-source_suffix = ".rst"
+source_suffix = {
+    ".rst": "restructuredtext",
+    ".md": "markdown",
+}
 
 # The encoding of source files.
 # source_encoding = 'utf-8-sig'

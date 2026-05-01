@@ -1,0 +1,147 @@
+# Architecture
+
+`xgboost-distribution` extends [XGBoost's scikit-learn `XGBRegressor`](https://xgboost.readthedocs.io/en/latest/python/python_api.html#xgboost.XGBRegressor) so that it estimates the parameters of a chosen probability distribution rather than a single point value. It does this with a **custom XGBoost objective** that computes per-parameter gradients and (optionally) **natural gradients** via the Fisher information.
+
+## High-level layout
+
+```
+src/xgboost_distribution/
+├── __init__.py              # exports XGBDistribution
+├── model.py                 # XGBDistribution(XGBRegressor) — sklearn-compatible model
+├── metrics.py               # log-likelihood scorers for sklearn (e.g. GridSearchCV)
+├── compat.py                # numpy/xgboost compatibility shims
+├── utils.py                 # JSON serialisation helpers
+└── distributions/
+    ├── base.py              # BaseDistribution (abstract)
+    ├── normal.py            # Normal distribution (loc, scale)
+    ├── laplace.py           # Laplace (loc, scale)
+    ├── log_normal.py        # LogNormal (scale, s)
+    ├── exponential.py       # Exponential (scale)
+    ├── poisson.py           # Poisson (mu)
+    ├── negative_binomial.py # NegativeBinomial (n, p)
+    └── utils.py             # numerical safety helpers (safe_exp, MIN/MAX_EXPONENT)
+```
+
+The two important pieces are:
+
+1. **`XGBDistribution`** — a subclass of `XGBRegressor`. It plugs a distribution-aware objective and evaluation function into the standard XGBoost training loop, then re-shapes the booster's raw outputs into named distribution parameters at predict time.
+2. **`BaseDistribution`** — abstract interface that every distribution implements. Distributions are stateless; they only define `params`, `starting_params`, `gradient_and_hessian`, `loss`, and `predict`.
+
+## Component diagram
+
+```mermaid
+flowchart LR
+    User["User code"] --> XGB["XGBDistribution<br/>(XGBRegressor subclass)"]
+    XGB -->|"uses"| Dist["BaseDistribution<br/>implementation"]
+    XGB -->|"sets objective + base_margin"| Booster["xgboost.train<br/>(Booster)"]
+    Dist -->|"gradient_and_hessian()"| Booster
+    Dist -->|"loss() (NLL)"| Booster
+    Booster -->|"raw multi-output<br/>params"| XGB
+    XGB -->|"distribution.predict()"| User2["NamedTuple of<br/>distribution params"]
+
+    subgraph distributions
+        direction TB
+        Dist
+        Normal["Normal"]
+        Laplace["Laplace"]
+        LogNormal["LogNormal"]
+        Exponential["Exponential"]
+        Poisson["Poisson"]
+        NegBinom["NegativeBinomial"]
+        Normal -.->|"subclass"| Dist
+        Laplace -.->|"subclass"| Dist
+        LogNormal -.->|"subclass"| Dist
+        Exponential -.->|"subclass"| Dist
+        Poisson -.->|"subclass"| Dist
+        NegBinom -.->|"subclass"| Dist
+    end
+```
+
+## Training data flow
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant X as XGBDistribution
+    participant D as Distribution
+    participant B as XGBoost Booster
+
+    U->>X: fit(X_train, y_train, eval_set)
+    X->>D: check_target(y), starting_params(y)
+    D-->>X: warm-start params (e.g. mean, log(std))
+    X->>B: train with custom obj + base_margin
+    loop each boosting round
+        B->>D: gradient_and_hessian(y, raw_params)
+        D-->>B: grad, hess
+        B->>D: loss(y, raw_params)
+        D-->>B: NLL
+    end
+    B-->>X: trained Booster (one tree per param, per round)
+    X-->>U: fitted model
+```
+
+## Prediction data flow
+
+`predict()` calls XGBoost with `output_margin=True` to get the booster's raw multi-output, then hands that to the distribution's `predict()` to map raw outputs back into interpretable parameters (e.g. apply `exp` to `log_scale` so `scale > 0`).
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant X as XGBDistribution
+    participant B as XGBoost Booster
+    participant D as Distribution
+
+    U->>X: predict(X_test)
+    X->>B: predict with output_margin=True
+    B-->>X: raw_params, shape (n_samples, n_params)
+    X->>D: predict(raw_params)
+    D-->>X: NamedTuple of distribution params
+    X-->>U: NamedTuple
+```
+
+## Key design decisions
+
+### Reparameterisation for unconstrained training
+
+XGBoost's leaf values are unconstrained real numbers, but distribution parameters often have constraints (`scale > 0`, `0 < p < 1`, `n >= 0`, …). Each distribution **reparameterises** so the booster can output any real value:
+
+| Distribution | Constrained param | Reparameterised as |
+| --- | --- | --- |
+| Normal | `scale > 0` | `log(scale)` |
+| Laplace | `scale > 0` | `log(scale)` |
+| LogNormal | `s > 0` | `log(s)` |
+| Exponential | `scale > 0` | `log(scale)` |
+| Poisson | `mu > 0` | `log(mu)` |
+| NegativeBinomial | `n > 0`, `0 < p < 1` | `log(n)`, `logit(p)` |
+
+The `predict()` method on each distribution applies the inverse transform.
+
+### Natural gradients
+
+By default, `XGBDistribution` uses **natural gradients** (`natural_gradient=True`). Instead of `g`, it solves `F · g_natural = g`, where `F` is the (reparameterised) Fisher information matrix of the distribution. This was first applied to gradient boosting in [NGBoost](https://github.com/stanfordmlgroup/ngboost) and gives more stable updates when the parameter space is curved (e.g. variance directions for Normal). The matrix solve uses [`numpy.linalg.solve`](https://numpy.org/doc/stable/reference/generated/numpy.linalg.solve.html) (wrapped in [`compat.linalg_solve`](../src/xgboost_distribution/compat.py) for NumPy 2.x compatibility).
+
+Set `natural_gradient=False` to fall back to vanilla gradients with a diagonal Hessian.
+
+### `base_margin` instead of `base_score`
+
+`XGBDistribution` sets `base_score=0` and supplies a per-parameter `base_margin` that equals `distribution.starting_params(y)`. This means each distribution parameter starts the boosting from a sensible warm point (e.g. mean and log-std of `y` for Normal), which dramatically reduces the number of rounds needed to reach reasonable estimates.
+
+### Stateless distributions, serialisable models
+
+Distribution classes hold no fitted state — they're pure functions. The trained `XGBDistribution` stores only:
+
+- the underlying `Booster`,
+- the distribution name (set via `Booster.set_attr("distribution", ...)`),
+- the starting params (JSON-serialised on the booster).
+
+This means [`save_model` / `load_model`](../src/xgboost_distribution/model.py) work through XGBoost's native serialisation; no pickle is required.
+
+## Adding a new distribution
+
+To add a distribution `Foo`:
+
+1. Create `src/xgboost_distribution/distributions/foo.py`.
+2. Implement `Foo(BaseDistribution)` with `params`, `starting_params`, `gradient_and_hessian`, `loss`, and `predict`. Reparameterise any constrained params, and document the math (see [`normal.py`](../src/xgboost_distribution/distributions/normal.py) for the template).
+3. Import it in [`distributions/__init__.py`](../src/xgboost_distribution/distributions/__init__.py) — `AVAILABLE_DISTRIBUTIONS` will pick it up automatically via `BaseDistribution.__subclasses__()`.
+4. Add a logpdf/logpmf entry for it in [`metrics.py`](../src/xgboost_distribution/metrics.py) under `dist_ll`, including the parameter-name tuple in `scipy.stats` order.
+5. Add tests under `tests/distributions/`.
